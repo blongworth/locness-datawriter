@@ -1,0 +1,12 @@
+{
+  "nixpacks": {
+    "providers": ["python"],
+    "pythonVersion": "3.13"
+  },
+  "build": {
+    "commands": ["python -m pip install --upgrade pip uv", "uv sync"]
+  },
+  "start": {
+    "cmd": "python main.py"
+  }
+}

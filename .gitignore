@@ -33,5 +33,3 @@ Thumbs.db
 # Railway
 .railway/
 
-# UV
-uv.lock

@@ -75,7 +75,7 @@ class DynamoDBDataReader:
             
             logger.info(f"Searching for data between {self.last_read_timestamp} and {current_timestamp}")
             
-            # Try to use table query first with partition key 'data' and sort key 'datetime_utc'
+            # Try to use table query first with partition key 'static_partition' (value 'data') and sort key 'datetime_utc'
             # If that fails, fall back to scan with optimizations
             items = self._try_query_data(self.last_read_timestamp, current_timestamp)
             

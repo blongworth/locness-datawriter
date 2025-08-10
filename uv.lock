@@ -220,6 +220,9 @@ requires-dist = [
     { name = "schedule", specifier = ">=1.2.0" },
 ]
 
+[package.metadata.requires-dev]
+dev = []
+
 [[package]]
 name = "numpy"
 version = "2.3.2"

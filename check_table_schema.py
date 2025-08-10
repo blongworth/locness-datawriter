@@ -62,7 +62,7 @@ def main():
         print("-"*30)
         
         # Check if schema is optimal
-        optimal_pk = partition_key == 'data'
+        optimal_pk = partition_key == 'static_partition' 
         optimal_sk = sort_key == 'datetime_utc'
         
         print(f"  Partition Key 'data': {'✅ YES' if optimal_pk else '❌ NO'} (current: {partition_key})")

@@ -75,7 +75,7 @@ class DynamoDBDataReader:
             
             logger.info(f"Searching for data between {self.last_read_timestamp} and {current_timestamp}")
             
-            # Try to use query first if there's a GSI on datetime_utc
+            # Try to use table query first with partition key 'data' and sort key 'datetime_utc'
             # If that fails, fall back to scan with optimizations
             items = self._try_query_data(self.last_read_timestamp, current_timestamp)
             
@@ -102,14 +102,17 @@ class DynamoDBDataReader:
             return []
     
     def _try_query_data(self, start_time: str, end_time: str) -> Optional[List[Dict[str, Any]]]:
-        """Try to query data using a GSI if available."""
+        """Try to query data using partition key 'data' and sort key 'datetime_utc'."""
         try:
-            # Try to use a GSI on datetime_utc (this may fail if no GSI exists)
+            # Use the main table with partition key 'data' and sort key 'datetime_utc'
             response = self.table.query(
-                IndexName='datetime_utc-index',  # Common GSI name
-                KeyConditionExpression='#ts BETWEEN :start_ts AND :end_ts',
-                ExpressionAttributeNames={'#ts': 'datetime_utc'},
+                KeyConditionExpression='#pk = :pk_val AND #sk BETWEEN :start_ts AND :end_ts',
+                ExpressionAttributeNames={
+                    '#pk': 'data',  # Partition key
+                    '#sk': 'datetime_utc'  # Sort key
+                },
                 ExpressionAttributeValues={
+                    ':pk_val': 'data',  # Static partition key value
                     ':start_ts': start_time,
                     ':end_ts': end_time
                 },
@@ -121,10 +124,13 @@ class DynamoDBDataReader:
             # Handle pagination for query
             while 'LastEvaluatedKey' in response:
                 response = self.table.query(
-                    IndexName='datetime_utc-index',
-                    KeyConditionExpression='#ts BETWEEN :start_ts AND :end_ts',
-                    ExpressionAttributeNames={'#ts': 'datetime_utc'},
+                    KeyConditionExpression='#pk = :pk_val AND #sk BETWEEN :start_ts AND :end_ts',
+                    ExpressionAttributeNames={
+                        '#pk': 'data',
+                        '#sk': 'datetime_utc'
+                    },
                     ExpressionAttributeValues={
+                        ':pk_val': 'data',
                         ':start_ts': start_time,
                         ':end_ts': end_time
                     },
@@ -133,11 +139,11 @@ class DynamoDBDataReader:
                 )
                 items.extend(response.get('Items', []))
             
-            logger.info("Successfully used GSI query for datetime range")
+            logger.info("Successfully used table query with partition key 'data' and sort key range")
             return items
             
         except Exception as e:
-            logger.warning(f"GSI query failed (this is normal if no GSI exists): {e}")
+            logger.warning(f"Table query failed (falling back to scan): {e}")
             return None
     
     def _scan_data_with_limits(self, start_time: str, end_time: str) -> List[Dict[str, Any]]:

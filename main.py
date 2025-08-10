@@ -102,17 +102,17 @@ class DynamoDBDataReader:
             return []
     
     def _try_query_data(self, start_time: str, end_time: str) -> Optional[List[Dict[str, Any]]]:
-        """Try to query data using partition key 'data' and sort key 'datetime_utc'."""
+        """Try to query data using partition key 'static_partition' and sort key 'datetime_utc'."""
         try:
-            # Use the main table with partition key 'data' and sort key 'datetime_utc'
+            # Use the main table with actual partition key 'static_partition' and sort key 'datetime_utc'
             response = self.table.query(
                 KeyConditionExpression='#pk = :pk_val AND #sk BETWEEN :start_ts AND :end_ts',
                 ExpressionAttributeNames={
-                    '#pk': 'data',  # Partition key
+                    '#pk': 'static_partition',  # Actual partition key
                     '#sk': 'datetime_utc'  # Sort key
                 },
                 ExpressionAttributeValues={
-                    ':pk_val': 'data',  # Static partition key value
+                    ':pk_val': 'data',  # The value stored in the static_partition key
                     ':start_ts': start_time,
                     ':end_ts': end_time
                 },
@@ -126,7 +126,7 @@ class DynamoDBDataReader:
                 response = self.table.query(
                     KeyConditionExpression='#pk = :pk_val AND #sk BETWEEN :start_ts AND :end_ts',
                     ExpressionAttributeNames={
-                        '#pk': 'data',
+                        '#pk': 'static_partition',
                         '#sk': 'datetime_utc'
                     },
                     ExpressionAttributeValues={
@@ -139,7 +139,7 @@ class DynamoDBDataReader:
                 )
                 items.extend(response.get('Items', []))
             
-            logger.info("Successfully used table query with partition key 'data' and sort key range")
+            logger.info("Successfully used table query with partition key 'static_partition' and sort key range")
             return items
             
         except Exception as e:

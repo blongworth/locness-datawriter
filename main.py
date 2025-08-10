@@ -16,6 +16,7 @@ from google.oauth2.credentials import Credentials
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from botocore.exceptions import BotoCoreError, ClientError
+from botocore.config import Config
 
 # Load environment variables
 load_dotenv()
@@ -43,18 +44,25 @@ class DynamoDBDataReader:
         if not self.table_name:
             raise ValueError("DYNAMODB_TABLE_NAME environment variable is required")
         
-        # Initialize DynamoDB client
+        # Initialize DynamoDB client with optimized configuration
+        config = Config(
+            region_name=os.getenv('AWS_REGION', 'us-east-1'),
+            retries={'max_attempts': 3, 'mode': 'adaptive'},
+            max_pool_connections=10
+        )
+        
         self.dynamodb = boto3.resource(
             'dynamodb',
             aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
             aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
-            region_name=os.getenv('AWS_REGION', 'us-east-1')
+            config=config
         )
         self.table = self.dynamodb.Table(self.table_name)
         self.last_read_timestamp = None
     
     def get_new_data(self) -> List[Dict[str, Any]]:
         """Fetch new data from DynamoDB since last read."""
+        start_time = time.time()
         try:
             # If this is the first read, get data from the last hour
             if self.last_read_timestamp is None:
@@ -67,37 +75,20 @@ class DynamoDBDataReader:
             
             logger.info(f"Searching for data between {self.last_read_timestamp} and {current_timestamp}")
             
-            # Scan for items with timestamp greater than last read
-            # Using string comparison for ISO datetime strings
-            response = self.table.scan(
-                FilterExpression='#ts > :last_ts AND #ts <= :current_ts',
-                ExpressionAttributeNames={
-                    '#ts': 'datetime_utc'  # Your timestamp attribute name
-                },
-                ExpressionAttributeValues={
-                    ':last_ts': self.last_read_timestamp,
-                    ':current_ts': current_timestamp
-                }
-            )
+            # Try to use query first if there's a GSI on datetime_utc
+            # If that fails, fall back to scan with optimizations
+            items = self._try_query_data(self.last_read_timestamp, current_timestamp)
             
-            items = response.get('Items', [])
-            
-            # Handle pagination if needed
-            while 'LastEvaluatedKey' in response:
-                response = self.table.scan(
-                    FilterExpression='#ts > :last_ts AND #ts <= :current_ts',
-                    ExpressionAttributeNames={'#ts': 'datetime_utc'},
-                    ExpressionAttributeValues={
-                        ':last_ts': self.last_read_timestamp,
-                        ':current_ts': current_timestamp
-                    },
-                    ExclusiveStartKey=response['LastEvaluatedKey']
-                )
-                items.extend(response.get('Items', []))
+            if items is None:
+                # Fall back to scan with pagination limit
+                items = self._scan_data_with_limits(self.last_read_timestamp, current_timestamp)
             
             # Update last read timestamp to current time
             self.last_read_timestamp = current_timestamp
-            logger.info(f"Retrieved {len(items)} new items from DynamoDB")
+            
+            # Performance logging
+            duration = time.time() - start_time
+            logger.info(f"Retrieved {len(items)} new items from DynamoDB in {duration:.2f}s")
             
             if items:
                 # Log a sample of the timestamps found
@@ -108,6 +99,86 @@ class DynamoDBDataReader:
             
         except (BotoCoreError, ClientError) as e:
             logger.error(f"Error reading from DynamoDB: {e}")
+            return []
+    
+    def _try_query_data(self, start_time: str, end_time: str) -> Optional[List[Dict[str, Any]]]:
+        """Try to query data using a GSI if available."""
+        try:
+            # Try to use a GSI on datetime_utc (this may fail if no GSI exists)
+            response = self.table.query(
+                IndexName='datetime_utc-index',  # Common GSI name
+                KeyConditionExpression='#ts BETWEEN :start_ts AND :end_ts',
+                ExpressionAttributeNames={'#ts': 'datetime_utc'},
+                ExpressionAttributeValues={
+                    ':start_ts': start_time,
+                    ':end_ts': end_time
+                },
+                ScanIndexForward=True  # Sort by datetime ascending
+            )
+            
+            items = response.get('Items', [])
+            
+            # Handle pagination for query
+            while 'LastEvaluatedKey' in response:
+                response = self.table.query(
+                    IndexName='datetime_utc-index',
+                    KeyConditionExpression='#ts BETWEEN :start_ts AND :end_ts',
+                    ExpressionAttributeNames={'#ts': 'datetime_utc'},
+                    ExpressionAttributeValues={
+                        ':start_ts': start_time,
+                        ':end_ts': end_time
+                    },
+                    ExclusiveStartKey=response['LastEvaluatedKey'],
+                    ScanIndexForward=True
+                )
+                items.extend(response.get('Items', []))
+            
+            logger.info("Successfully used GSI query for datetime range")
+            return items
+            
+        except Exception as e:
+            logger.warning(f"GSI query failed (this is normal if no GSI exists): {e}")
+            return None
+    
+    def _scan_data_with_limits(self, start_time: str, end_time: str) -> List[Dict[str, Any]]:
+        """Scan data with optimizations and limits."""
+        items = []
+        scan_params = {
+            'FilterExpression': '#ts > :last_ts AND #ts <= :current_ts',
+            'ExpressionAttributeNames': {'#ts': 'datetime_utc'},
+            'ExpressionAttributeValues': {
+                ':last_ts': start_time,
+                ':current_ts': end_time
+            },
+            'Limit': 1000,  # Limit scan to reduce consumed capacity
+            'Select': 'ALL_ATTRIBUTES'  # Can optimize by selecting only needed attributes
+        }
+        
+        try:
+            response = self.table.scan(**scan_params)
+            items = response.get('Items', [])
+            
+            # Handle pagination with safety limits
+            pagination_count = 0
+            max_pages = 10  # Prevent runaway pagination
+            
+            while 'LastEvaluatedKey' in response and pagination_count < max_pages:
+                scan_params['ExclusiveStartKey'] = response['LastEvaluatedKey']
+                response = self.table.scan(**scan_params)
+                items.extend(response.get('Items', []))
+                pagination_count += 1
+                
+                # Log progress for large scans
+                if len(items) % 500 == 0:
+                    logger.info(f"Scan progress: {len(items)} items retrieved...")
+            
+            if pagination_count >= max_pages:
+                logger.warning(f"Scan pagination limit reached. Retrieved {len(items)} items, but more may exist.")
+            
+            return items
+            
+        except (BotoCoreError, ClientError) as e:
+            logger.error(f"Error during optimized scan: {e}")
             return []
 
 

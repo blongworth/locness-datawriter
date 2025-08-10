@@ -190,8 +190,9 @@ class GoogleDriveUploader:
         self.shared_drive_id = os.getenv('GOOGLE_SHARED_DRIVE_ID')  # Add support for shared drives
         self.credentials_file = os.getenv('GOOGLE_CREDENTIALS_FILE')
         
-        if not self.credentials_file:
-            raise ValueError("GOOGLE_CREDENTIALS_FILE environment variable is required")
+        # For Railway deployment, credentials can come from environment variable
+        if not self.credentials_file and not os.getenv('GOOGLE_CREDENTIALS_JSON'):
+            raise ValueError("Either GOOGLE_CREDENTIALS_FILE or GOOGLE_CREDENTIALS_JSON environment variable is required")
         
         self.service = self._get_drive_service()
         self.file_cache = {}  # Cache file IDs by filename
@@ -204,6 +205,25 @@ class GoogleDriveUploader:
         """Authenticate and return Google Drive service."""
         import json
         
+        # First, try to use credentials from environment variable (Railway deployment)
+        google_creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
+        if google_creds_json:
+            try:
+                creds_data = json.loads(google_creds_json)
+                if creds_data.get('type') == 'service_account':
+                    logger.info("Using service account credentials from environment variable")
+                    creds = ServiceAccountCredentials.from_service_account_info(
+                        creds_data, 
+                        scopes=SCOPES
+                    )
+                    return build('drive', 'v3', credentials=creds)
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.warning(f"Could not parse GOOGLE_CREDENTIALS_JSON: {e}")
+        
+        # Fall back to file-based credentials
+        if not self.credentials_file:
+            raise ValueError("Either GOOGLE_CREDENTIALS_FILE or GOOGLE_CREDENTIALS_JSON environment variable is required")
+        
         # Check if it's a service account credentials file
         try:
             with open(self.credentials_file, 'r') as f:
@@ -211,7 +231,7 @@ class GoogleDriveUploader:
             
             if creds_data.get('type') == 'service_account':
                 # Use service account authentication
-                logger.info("Using service account credentials for Google Drive")
+                logger.info("Using service account credentials from file")
                 creds = ServiceAccountCredentials.from_service_account_file(
                     self.credentials_file, 
                     scopes=SCOPES
@@ -219,7 +239,7 @@ class GoogleDriveUploader:
                 return build('drive', 'v3', credentials=creds)
             
         except (json.JSONDecodeError, FileNotFoundError, KeyError) as e:
-            logger.warning(f"Could not parse credentials as service account: {e}")
+            logger.warning(f"Could not parse credentials file as service account: {e}")
         
         # Fall back to OAuth flow for installed app credentials
         logger.info("Using OAuth credentials for Google Drive")
